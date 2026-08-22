@@ -94,6 +94,28 @@ function fmtDate(d) {
 }
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c])); }
 
+// ---------------- 입력 중이던 내용 임시 저장 (앱 전환/새로고침 대비) ----------------
+const DRAFT_KEY = "ledger_expense_draft";
+function saveDraftFromForm(form) {
+  const fd = new FormData(form);
+  const draft = {
+    id: state.modal?.data?.id || null,
+    title: fd.get("title") || "",
+    amount: String(fd.get("amount") || "").replace(/[^0-9]/g, ""),
+    account_id: fd.get("account_id") || "",
+    tag_id: fd.get("tag_id") || "",
+    date: fd.get("date") || "",
+    memo: fd.get("memo") || "",
+  };
+  try { localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); } catch (e) {}
+}
+function loadDraft() {
+  try { return JSON.parse(localStorage.getItem(DRAFT_KEY)); } catch (e) { return null; }
+}
+function clearDraft() {
+  try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+}
+
 const state = {
   session: null,
   loading: true,
@@ -564,6 +586,8 @@ function bindAppEvents() {
   const expenseForm = document.getElementById("expense-form");
   if (expenseForm) {
     expenseForm.addEventListener("submit", onSubmitExpense);
+    expenseForm.addEventListener("input", () => saveDraftFromForm(expenseForm));
+    expenseForm.addEventListener("change", () => saveDraftFromForm(expenseForm));
     const amountInput = document.getElementById("amount-input");
     amountInput.addEventListener("input", () => {
       const digits = amountInput.value.replace(/[^0-9]/g, "");
@@ -586,12 +610,17 @@ async function handleAction(action, el) {
     render();
   }
   else if (action === "open-manage") { state.modal = { type: "manage" }; render(); }
-  else if (action === "close-modal") { state.modal = null; render(); }
+  else if (action === "close-modal") {
+    if (state.modal?.type === "expense") clearDraft();
+    state.modal = null; render();
+  }
   else if (action === "open-add") {
+    clearDraft();
     state.modal = { type: "expense", data: { title:"", amount:"", account_id: state.accounts[0]?.id || "", tag_id: state.tags[0]?.id || "", memo:"", date: fmtDate(new Date()) } };
     render();
   }
   else if (action === "open-edit") {
+    clearDraft();
     const item = state.expenses.find((e) => e.id === el.dataset.id);
     if (item) { state.modal = { type: "expense", data: item }; render(); }
   }
@@ -648,6 +677,7 @@ async function onSubmitExpense(e) {
     state.expenses = [data, ...state.expenses];
   }
   state.modal = null;
+  clearDraft();
   render();
 }
 
@@ -674,17 +704,37 @@ async function onAddTag(e) {
 async function init() {
   const { data: { session } } = await supabase.auth.getSession();
   state.session = session;
-  if (session) await loadAll();
+  if (session) {
+    await loadAll();
+    restoreDraftIfAny();
+  }
   state.loading = false;
   render();
 
   supabase.auth.onAuthStateChange(async (_event, session) => {
     state.session = session;
-    if (session) { state.loading = true; render(); await loadAll(); }
+    if (session) { state.loading = true; render(); await loadAll(); restoreDraftIfAny(); }
     else { state.accounts = []; state.tags = []; state.expenses = []; }
     state.loading = false;
     render();
   });
+}
+
+function restoreDraftIfAny() {
+  const draft = loadDraft();
+  if (!draft) return;
+  state.modal = {
+    type: "expense",
+    data: {
+      id: draft.id || null,
+      title: draft.title || "",
+      amount: draft.amount || "",
+      account_id: draft.account_id || state.accounts[0]?.id || "",
+      tag_id: draft.tag_id || state.tags[0]?.id || "",
+      date: draft.date || fmtDate(new Date()),
+      memo: draft.memo || "",
+    },
+  };
 }
 
 init();
