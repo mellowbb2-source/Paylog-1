@@ -737,6 +737,15 @@ function restoreDraftIfAny() {
   };
 }
 
+// 앱이 배경으로 전환되는 그 순간 한 번 더 확실히 저장 (모바일에서 입력 중 사라짐 방지)
+function forceSaveIfEditing() {
+  const f = document.getElementById("expense-form");
+  if (f) saveDraftFromForm(f);
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden) forceSaveIfEditing(); });
+window.addEventListener("pagehide", forceSaveIfEditing);
+window.addEventListener("blur", forceSaveIfEditing);
+
 init();
 </script>
 </body>
