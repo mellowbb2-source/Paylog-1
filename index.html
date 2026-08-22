@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>가계부</title>
+<link rel="manifest" href="/manifest.json" />
+<meta name="theme-color" content="#4338CA" />
+<style>
+  @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css');
+
+  :root {
+    --bg: #FFFFFF;
+    --surface: #F8FAFC;
+    --surface2: #EEF2F7;
+    --border: #DCE3EC;
+    --text: #0F172A;
+    --muted: #64748B;
+    --brand: #4338CA;
+    --positive: #059669;
+    --warn: #DC2626;
+    --warn-bg: #FDECEF;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }
+  body { font-family: 'Pretendard', 'Noto Sans KR', sans-serif; -webkit-tap-highlight-color: transparent; }
+  button, input, select, textarea { font-family: inherit; }
+  button { cursor: pointer; }
+  .mono { font-variant-numeric: tabular-nums; }
+  .truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #app { max-width: 480px; margin: 0 auto; padding: 0 16px 100px; min-height: 100vh; }
+  .fab {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(calc(-50% + min(200px,42vw)));
+    width: 56px; height: 56px; border-radius: 50%; background: var(--brand); color: #fff;
+    border: none; font-size: 26px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 8px 20px rgba(67,56,202,.3); z-index: 20;
+  }
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: flex-end; justify-content: center; z-index: 50; }
+  .modal-sheet { width: 100%; max-width: 480px; max-height: 85vh; overflow-y: auto; background: #fff; border-radius: 20px 20px 0 0; padding: 20px; }
+  .field-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; font-weight: 600; }
+  .input {
+    width: 100%; font-size: 14px; padding: 10px 12px; background: var(--surface2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+  }
+  .badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; font-weight: 700; font-size: 11.5px; }
+  .card { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 15px; margin-bottom: 10px; }
+  .btn-primary { background: var(--brand); color: #fff; border: none; border-radius: 10px; font-weight: 700; padding: 11px 0; font-size: 14px; }
+  .btn-outline { background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 6px 9px; font-size: 10.5px; color: var(--text); font-weight: 600; white-space: nowrap; }
+  button, .field-label, h1, h2 { white-space: nowrap; }
+  ::selection { background: #4338CA33; }
+  input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+</style>
+</head>
+<body>
+<div id="app">로딩 중...</div>
+
+<script type="module">
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+// ====== 여기에 본인 Supabase 프로젝트 정보를 넣으세요 ======
+const SUPABASE_URL = "https://ujfqxggtaapnwvdexmgb.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_xzo1FLmnBVTEjw0JtZ3xCg_fFmGdWEd";
+// ==========================================================
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const ACCOUNT_PALETTE = ["#4338CA", "#0891B2", "#059669", "#7C3AED", "#DB2777", "#DC2626"];
+const TAG_PALETTE = ["#64748B", "#4338CA", "#0891B2", "#059669", "#7C3AED", "#DC2626", "#DB2777"];
+
+const won = (n) => new Intl.NumberFormat("ko-KR").format(Math.round(n || 0));
+function wonToKorean(n) {
+  const num = Math.round(Number(n) || 0);
+  if (num === 0) return "0원";
+  const units = ["", "만", "억", "조"];
+  let str = String(Math.abs(num));
+  const groups = [];
+  while (str.length > 0) { groups.unshift(str.slice(-4)); str = str.slice(0, -4); }
+  const parts = [];
+  groups.forEach((g, idx) => {
+    const val = parseInt(g, 10);
+    if (val === 0) return;
+    const unitIndex = groups.length - 1 - idx;
+    parts.push(`${val}${units[unitIndex]}`);
+  });
+  return (num < 0 ? "-" : "") + parts.join(" ") + "원";
+}
+function wonToManKorean(n) {
+  const rounded = Math.round((Number(n) || 0) / 10000) * 10000;
+  return wonToKorean(rounded);
+}
+function fmtDate(d) {
+  const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,"0"), day = String(d.getDate()).padStart(2,"0");
+  return `${y}-${m}-${day}`;
+}
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c])); }
+
+const state = {
+  session: null,
+  loading: true,
+  authMode: "login",
+  authError: "",
+  accounts: [], tags: [], expenses: [],
+  cursor: new Date(),
+  tab: "dashboard",
+  groupBy: "account",
+  filterId: "all",
+  modal: null, // { type: 'expense'|'manage'|'day', ...payload }
+};
+
+const root = document.getElementById("app");
+
+// ---------------- 데이터 로딩 ----------------
+async function loadAll() {
+  const [{ data: accounts }, { data: tags }, { data: expenses }] = await Promise.all([
+    supabase.from("accounts").select("*").order("created_at"),
+    supabase.from("tags").select("*").order("created_at"),
+    supabase.from("expenses").select("*").order("date", { ascending: false }),
+  ]);
+  state.accounts = accounts || [];
+  state.tags = tags || [];
+  state.expenses = expenses || [];
+  if (state.accounts.length === 0) await seedDefaults();
+}
+
+async function seedDefaults() {
+  const uid = state.session.user.id;
+  const { data: accs } = await supabase.from("accounts").insert([
+    { user_id: uid, name: "현금", color: ACCOUNT_PALETTE[0] },
+    { user_id: uid, name: "카드", color: ACCOUNT_PALETTE[1] },
+  ]).select();
+  const { data: tgs } = await supabase.from("tags").insert([
+    { user_id: uid, name: "식비", color: TAG_PALETTE[1] },
+    { user_id: uid, name: "생활", color: TAG_PALETTE[2] },
+  ]).select();
+  state.accounts = accs || [];
+  state.tags = tgs || [];
+}
+
+// ---------------- 계산 헬퍼 ----------------
+function getMonthData() {
+  const year = state.cursor.getFullYear(), month = state.cursor.getMonth();
+  const monthExpenses = state.expenses.filter((e) => {
+    const d = new Date(e.date);
+    return d.getFullYear() === year && d.getMonth() === month;
+  });
+  const accountById = Object.fromEntries(state.accounts.map((a) => [a.id, a]));
+  const tagById = Object.fromEntries(state.tags.map((t) => [t.id, t]));
+  const monthTotal = monthExpenses.reduce((s, e) => s + Number(e.amount), 0);
+
+  const accMap = {};
+  monthExpenses.forEach((e) => { accMap[e.account_id] = (accMap[e.account_id] || 0) + Number(e.amount); });
+  const accountTotals = state.accounts.map((a) => ({ ...a, total: accMap[a.id] || 0 })).sort((a,b) => b.total - a.total);
+
+  const tagMap = {};
+  monthExpenses.forEach((e) => { tagMap[e.tag_id] = (tagMap[e.tag_id] || 0) + Number(e.amount); });
+  const tagTotals = state.tags.map((t) => ({ ...t, total: tagMap[t.id] || 0 })).sort((a,b) => b.total - a.total);
+
+  const dailyTotals = {};
+  monthExpenses.forEach((e) => { dailyTotals[e.date] = (dailyTotals[e.date] || 0) + Number(e.amount); });
+  const dailyVals = Object.values(dailyTotals);
+  const overspendThreshold = dailyVals.length ? (dailyVals.reduce((s,v)=>s+v,0) / dailyVals.length) * 1.5 : Infinity;
+
+  return { year, month, monthExpenses, accountById, tagById, monthTotal, accountTotals, tagTotals, dailyTotals, overspendThreshold };
+}
+
+function getFilteredExpenses(monthExpenses) {
+  if (state.filterId === "all") return monthExpenses;
+  const key = state.groupBy === "account" ? "account_id" : "tag_id";
+  return monthExpenses.filter((e) => e[key] === state.filterId);
+}
+
+// ---------------- 렌더링 ----------------
+function render() {
+  if (state.loading) { root.innerHTML = `<div style="padding-top:80px;text-align:center;color:var(--muted)">로딩 중...</div>`; return; }
+  if (!state.session) { root.innerHTML = renderAuth(); bindAuthEvents(); return; }
+  root.innerHTML = renderApp();
+  bindAppEvents();
+}
+
+function renderAuth() {
+  return `
+    <div style="padding-top:64px;">
+      <div style="font-size:11px;color:var(--muted);letter-spacing:.15em;text-align:center;margin-bottom:6px;">LEDGER</div>
+      <h1 style="text-align:center;font-size:24px;font-weight:800;margin:0 0 28px;">가계부</h1>
+      <form id="auth-form" style="display:flex;flex-direction:column;gap:12px;">
+        <div>
+          <div class="field-label">이메일</div>
+          <input class="input" type="email" id="auth-email" required placeholder="you@example.com" />
+        </div>
+        <div>
+          <div class="field-label">비밀번호</div>
+          <input class="input" type="password" id="auth-password" required placeholder="6자 이상" minlength="6" />
+        </div>
+        ${state.authError ? `<div style="color:var(--warn);font-size:12px;">${esc(state.authError)}</div>` : ""}
+        <button type="submit" class="btn-primary" style="margin-top:8px;">${state.authMode === "login" ? "로그인" : "회원가입"}</button>
+      </form>
+      <button id="auth-toggle" style="width:100%;background:none;border:none;color:var(--muted);font-size:12px;margin-top:14px;text-align:center;">
+        ${state.authMode === "login" ? "계정이 없나요? 회원가입" : "이미 계정이 있나요? 로그인"}
+      </button>
+    </div>
+  `;
+}
+
+function bindAuthEvents() {
+  document.getElementById("auth-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = document.getElementById("auth-email").value.trim();
+    const password = document.getElementById("auth-password").value;
+    state.authError = "";
+    const fn = state.authMode === "login" ? supabase.auth.signInWithPassword : supabase.auth.signUp;
+    const { data, error } = await fn.call(supabase.auth, { email, password });
+    if (error) { state.authError = error.message; render(); return; }
+    if (state.authMode === "signup" && !data.session) {
+      state.authError = "가입 확인 이메일을 보냈어요. 확인 후 로그인해주세요.";
+      render();
+      return;
+    }
+  });
+  document.getElementById("auth-toggle").addEventListener("click", () => {
+    state.authMode = state.authMode === "login" ? "signup" : "login";
+    state.authError = "";
+    render();
+  });
+}
+
+function renderApp() {
+  const md = getMonthData();
+  const monthLabel = `${md.year}년 ${md.month + 1}월`;
+  let body = "";
+  if (state.tab === "dashboard") body = renderDashboard(md);
+  else if (state.tab === "calendar") body = renderCalendar(md);
+  else body = renderList(md);
+
+  return `
+    <div style="padding-top:20px;display:flex;align-items:flex-end;justify-content:space-between;gap:6px;">
+      <div style="min-width:0;">
+        <div style="font-size:10px;color:var(--muted);letter-spacing:.15em;margin-bottom:4px;white-space:nowrap;">LEDGER</div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button data-action="shift-month" data-dir="-1" style="width:24px;height:24px;flex-shrink:0;background:none;border:1px solid var(--border);border-radius:6px;">‹</button>
+          <h1 style="font-size:19px;font-weight:800;margin:0;white-space:nowrap;">${monthLabel}</h1>
+          <button data-action="shift-month" data-dir="1" style="width:24px;height:24px;flex-shrink:0;background:none;border:1px solid var(--border);border-radius:6px;">›</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:5px;flex-shrink:0;">
+        <button class="btn-outline" data-action="open-manage">계좌·태그</button>
+        <button class="btn-outline" data-action="sign-out">로그아웃</button>
+      </div>
+    </div>
+
+    <div style="display:flex;margin-top:20px;margin-bottom:8px;border-bottom:1px solid var(--border);">
+      ${["dashboard","calendar","list"].map((t) => `
+        <button data-action="set-tab" data-tab="${t}" style="flex:1;padding:10px 0;background:none;border:none;
+          font-size:13px;font-weight:${state.tab===t?700:500};color:${state.tab===t?"var(--text)":"var(--muted)"};
+          border-bottom:2px solid ${state.tab===t?"var(--brand)":"transparent"};margin-bottom:-1px;">
+          ${t==="dashboard"?"대시보드":t==="calendar"?"캘린더":"내역"}
+        </button>`).join("")}
+    </div>
+
+    ${body}
+
+    <button class="fab" data-action="open-add">+</button>
+    ${renderModal(md)}
+  `;
+}
+
+function renderDashboard(md) {
+  const maxAcc = Math.max(1, ...md.accountTotals.map((a) => a.total));
+  const topAccount = md.accountTotals[0];
+  const topTag = md.tagTotals[0];
+  return `
+    <div style="margin-top:8px;padding-bottom:20px;border-bottom:1px solid var(--border);">
+      <div style="font-size:11.5px;color:var(--muted);font-weight:700;">이번 달 총 지출</div>
+      <div class="mono" style="font-size:38px;font-weight:800;margin-top:6px;color:var(--brand);letter-spacing:-.02em;">₩${won(md.monthTotal)}</div>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:4px;font-weight:600;">${md.monthExpenses.length}건 기록됨</div>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:8px;margin:28px 0 12px;">
+      <span style="width:4px;height:16px;background:var(--brand);border-radius:2px;"></span>
+      <h2 style="font-size:14px;font-weight:800;margin:0;">계좌별 지출 현황</h2>
+    </div>
+    ${md.accountTotals.map((a) => `
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          ${badge(a.color, a.name)}
+          <span class="mono" style="font-weight:800;font-size:15px;">₩${won(a.total)}</span>
+        </div>
+        <div style="margin-top:8px;height:7px;background:var(--surface2);border-radius:4px;overflow:hidden;">
+          <div style="width:${(a.total/maxAcc)*100}%;height:100%;background:${a.color};border-radius:4px;"></div>
+        </div>
+      </div>
+    `).join("") || emptyNote("등록된 계좌가 없어요.")}
+
+    ${topAccount && topAccount.total > 0 ? `
+      <div style="display:flex;align-items:center;gap:8px;margin:28px 0 12px;">
+        <span style="width:4px;height:16px;background:var(--brand);border-radius:2px;"></span>
+        <h2 style="font-size:14px;font-weight:800;margin:0;">이번 달 요약</h2>
+      </div>
+      <div class="card">
+        ${summaryRow("가장 많이 쓴 계좌", topAccount.name, topAccount.total, topAccount.color)}
+        ${topTag && topTag.total > 0 ? `<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);">${summaryRow("가장 많이 쓴 태그", topTag.name, topTag.total, topTag.color)}</div>` : ""}
+      </div>
+    ` : ""}
+  `;
+}
+
+function summaryRow(label, name, amount, color) {
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <div>
+        <div style="font-size:11px;color:var(--muted);font-weight:700;">${label}</div>
+        <div style="margin-top:6px;">${badge(color, name)}</div>
+      </div>
+      <span class="mono" style="color:${color};font-weight:800;font-size:17px;">₩${won(amount)}</span>
+    </div>
+  `;
+}
+
+function badge(color, name) {
+  return `<span class="badge" style="background:${color}17;color:${color};"><span style="width:6px;height:6px;border-radius:50%;background:${color};display:inline-block;"></span>${esc(name)}</span>`;
+}
+function emptyNote(text) {
+  return `<div style="font-size:12px;color:var(--muted);text-align:center;padding:32px 0;border:1px dashed var(--border);border-radius:12px;">${esc(text)}</div>`;
+}
+
+function filterBar() {
+  const opts = state.groupBy === "account" ? state.accounts : state.tags;
+  return `
+    <div style="display:flex;gap:8px;margin:12px 0;">
+      <div style="display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;">
+        ${["account","tag"].map((k) => `
+          <button data-action="set-groupby" data-groupby="${k}" style="padding:6px 10px;font-size:11px;font-weight:700;border:none;
+            background:${state.groupBy===k?"var(--text)":"transparent"};color:${state.groupBy===k?"#fff":"var(--text)"};">
+            ${k==="account"?"계좌":"태그"}
+          </button>`).join("")}
+      </div>
+      <select id="filter-select" data-action="set-filter" style="flex:1;font-size:12px;padding:6px 8px;background:#fff;color:var(--text);border:1px solid var(--border);border-radius:8px;">
+        <option value="all" ${state.filterId==="all"?"selected":""}>전체 보기</option>
+        ${opts.map((o) => `<option value="${o.id}" ${state.filterId===o.id?"selected":""}>${esc(o.name)}</option>`).join("")}
+      </select>
+    </div>
+  `;
+}
+
+function renderCalendar(md) {
+  const firstDay = new Date(md.year, md.month, 1);
+  const startWeekday = firstDay.getDay();
+  const daysInMonth = new Date(md.year, md.month + 1, 0).getDate();
+  const filtered = getFilteredExpenses(md.monthExpenses);
+  const byDate = {};
+  filtered.forEach((e) => { (byDate[e.date] = byDate[e.date] || []).push(e); });
+  const weekdays = ["일","월","화","수","목","금","토"];
+
+  let cells = "";
+  for (let i = 0; i < startWeekday; i++) cells += `<div></div>`;
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dateStr = fmtDate(new Date(md.year, md.month, d));
+    const items = byDate[dateStr] || [];
+    const total = md.dailyTotals[dateStr] || 0;
+    const isOver = total > md.overspendThreshold && total > 0;
+    const preview = items[0];
+    const hasMore = items.length > 1;
+    cells += `
+      <button data-action="open-day" data-date="${dateStr}" ${items.length===0?"disabled":""}
+        style="height:70px;border-radius:10px;padding:4px;overflow:hidden;
+        display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;text-align:left;
+        background:${isOver ? "var(--warn-bg)" : "var(--surface)"};border:1px solid ${isOver ? "var(--warn)" : "var(--border)"};">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:2px;width:100%;">
+          <span style="font-size:9.5px;color:${isOver?"var(--warn)":"var(--muted)"};font-weight:${isOver?700:600};flex-shrink:0;">${d}</span>
+          ${total>0?`<span class="truncate mono" style="font-size:7.5px;color:${isOver?"var(--warn)":"var(--muted)"};font-weight:700;">${wonToManKorean(total)}</span>`:""}
+        </div>
+        ${preview?`
+          <div style="margin-top:4px;background:var(--surface2);border-radius:6px;padding:2px 4px;overflow:hidden;">
+            <div class="truncate" style="font-size:8px;color:var(--text);font-weight:600;line-height:1.3;">${esc(preview.title)}</div>
+            <div class="mono truncate" style="font-size:7.5px;color:var(--muted);line-height:1.3;">₩${won(preview.amount)}</div>
+          </div>`:""}
+        ${hasMore?`<div style="text-align:center;margin-top:2px;font-size:9px;color:var(--muted);font-weight:700;">···</div>`:""}
+      </button>
+    `;
+  }
+
+  return `
+    ${filterBar()}
+    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;text-align:center;font-size:11px;color:var(--muted);margin-bottom:4px;">
+      ${weekdays.map((w) => `<div style="padding:4px 0;">${w}</div>`).join("")}
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;">${cells}</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:12px;">
+      붉은 칸 = 과지출한 날 · 날짜 옆 숫자는 그날 총 지출액(만원 단위) · 칸을 누르면 전체 내역을 볼 수 있어요
+    </div>
+  `;
+}
+
+function renderList(md) {
+  const filtered = getFilteredExpenses(md.monthExpenses);
+  const totals = state.groupBy === "account" ? md.accountTotals : md.tagTotals;
+  const sorted = [...filtered].sort((a,b) => b.date.localeCompare(a.date));
+  return `
+    ${filterBar()}
+    ${state.filterId === "all" ? `
+      <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:6px;margin-bottom:10px;">
+        ${totals.map((t) => `
+          <button data-action="set-filter-direct" data-id="${t.id}" style="flex-shrink:0;min-width:116px;text-align:left;padding:10px 12px;
+            background:var(--surface);border:1px solid var(--border);border-top:3px solid ${t.color};border-radius:8px;">
+            <div style="font-size:11.5px;font-weight:700;">${esc(t.name)}</div>
+            <div class="mono" style="font-size:15px;margin-top:3px;font-weight:800;color:${t.color};">₩${won(t.total)}</div>
+          </button>
+        `).join("")}
+      </div>
+    ` : ""}
+    <div>
+      ${sorted.map((e) => `
+        <button class="card" data-action="open-edit" data-id="${e.id}" style="display:block;width:100%;text-align:left;cursor:pointer;">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+            <div style="min-width:0;">
+              <div style="font-size:15px;font-weight:700;">${esc(e.title)}</div>
+              <div style="font-size:11px;color:var(--muted);font-weight:600;margin-top:3px;">${e.date.slice(5).replace("-","/")}</div>
+              <div style="display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap;">
+                ${badge(md.accountById[e.account_id]?.color || "#999", md.accountById[e.account_id]?.name || "-")}
+                ${badge(md.tagById[e.tag_id]?.color || "#999", md.tagById[e.tag_id]?.name || "-")}
+              </div>
+            </div>
+            <span class="mono" style="font-size:16px;font-weight:800;flex-shrink:0;margin-left:8px;">₩${won(e.amount)}</span>
+          </div>
+        </button>
+      `).join("") || emptyNote("이번 달 지출 내역이 없어요.")}
+    </div>
+  `;
+}
+
+function renderModal(md) {
+  if (!state.modal) return "";
+  if (state.modal.type === "expense") return renderExpenseModal(state.modal.data);
+  if (state.modal.type === "manage") return renderManageModal();
+  if (state.modal.type === "day") return renderDayModal(state.modal, md);
+  return "";
+}
+
+function renderExpenseModal(data) {
+  const isNew = !data.id;
+  const amountDisplay = data.amount ? Number(data.amount).toLocaleString("ko-KR") : "";
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <div class="modal-sheet" onclick="event.stopPropagation()">
+        <div style="display:flex;justify-content:space-between;margin-bottom:16px;">
+          <h2 style="font-size:18px;font-weight:800;margin:0;">${isNew?"지출 추가":"지출 수정"}</h2>
+          <button data-action="close-modal" style="background:none;border:none;color:var(--muted);font-size:16px;">✕</button>
+        </div>
+        <form id="expense-form" style="display:flex;flex-direction:column;gap:12px;">
+          <div>
+            <div class="field-label">제목</div>
+            <input class="input" name="title" required value="${esc(data.title || "")}" placeholder="예: 점심 식사" />
+          </div>
+          <div>
+            <div class="field-label">금액</div>
+            <input class="input mono" id="amount-input" name="amount" required inputmode="numeric" value="${amountDisplay}" placeholder="0" />
+            <div id="amount-korean" style="font-size:12px;color:var(--muted);margin-top:4px;">${data.amount ? wonToKorean(data.amount) : ""}</div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div>
+              <div class="field-label">계좌</div>
+              <select class="input" name="account_id">
+                ${state.accounts.map((a) => `<option value="${a.id}" ${data.account_id===a.id?"selected":""}>${esc(a.name)}</option>`).join("")}
+              </select>
+            </div>
+            <div>
+              <div class="field-label">태그</div>
+              <select class="input" name="tag_id">
+                ${state.tags.map((t) => `<option value="${t.id}" ${data.tag_id===t.id?"selected":""}>${esc(t.name)}</option>`).join("")}
+              </select>
+            </div>
+          </div>
+          <div>
+            <div class="field-label">날짜</div>
+            <input class="input" type="date" name="date" required value="${data.date || fmtDate(new Date())}" />
+          </div>
+          <div>
+            <div class="field-label">내용 (메모)</div>
+            <textarea class="input" name="memo" rows="2" placeholder="선택 입력">${esc(data.memo || "")}</textarea>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:6px;">
+            ${!isNew ? `<button type="button" data-action="delete-expense" data-id="${data.id}" style="padding:10px 16px;font-size:13px;background:#fff;color:var(--warn);border:1px solid var(--warn);border-radius:10px;">삭제</button>` : ""}
+            <button type="submit" class="btn-primary" style="flex:1;">저장</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+}
+
+function renderManageModal() {
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <div class="modal-sheet" onclick="event.stopPropagation()">
+        <div style="display:flex;justify-content:space-between;margin-bottom:16px;">
+          <h2 style="font-size:18px;font-weight:800;margin:0;">계좌·태그 관리</h2>
+          <button data-action="close-modal" style="background:none;border:none;color:var(--muted);font-size:16px;">✕</button>
+        </div>
+        <div style="font-size:12px;font-weight:800;margin-bottom:8px;">계좌</div>
+        ${state.accounts.map((a) => `
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);">
+            ${badge(a.color, a.name)}
+            <button data-action="remove-account" data-id="${a.id}" style="background:none;border:none;color:var(--warn);font-size:12px;">삭제</button>
+          </div>
+        `).join("")}
+        <form data-action="add-account" style="display:flex;gap:8px;margin:12px 0 20px;">
+          <input class="input" name="name" placeholder="새 계좌 이름" required />
+          <button type="submit" class="btn-primary" style="padding:0 16px;flex-shrink:0;">추가</button>
+        </form>
+        <div style="font-size:12px;font-weight:800;margin-bottom:8px;">태그</div>
+        ${state.tags.map((t) => `
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);">
+            ${badge(t.color, t.name)}
+            <button data-action="remove-tag" data-id="${t.id}" style="background:none;border:none;color:var(--warn);font-size:12px;">삭제</button>
+          </div>
+        `).join("")}
+        <form data-action="add-tag" style="display:flex;gap:8px;margin-top:12px;">
+          <input class="input" name="name" placeholder="새 태그 이름" required />
+          <button type="submit" class="btn-primary" style="padding:0 16px;flex-shrink:0;">추가</button>
+        </form>
+      </div>
+    </div>
+  `;
+}
+
+function renderDayModal(modal, md) {
+  const { dateStr, items } = modal;
+  const total = items.reduce((s,e) => s + Number(e.amount), 0);
+  const label = `${Number(dateStr.slice(5,7))}월 ${Number(dateStr.slice(8,10))}일`;
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <div class="modal-sheet" onclick="event.stopPropagation()">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+          <h2 style="font-size:18px;font-weight:800;margin:0;">${label}</h2>
+          <button data-action="close-modal" style="background:none;border:none;color:var(--muted);font-size:16px;">✕</button>
+        </div>
+        <div class="mono" style="font-size:14px;color:var(--brand);font-weight:800;margin-bottom:16px;">총 ₩${won(total)}</div>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          ${items.map((e) => `
+            <button class="card" data-action="open-edit" data-id="${e.id}" style="display:block;width:100%;text-align:left;margin-bottom:0;">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <div style="min-width:0;">
+                  <div style="font-size:14px;font-weight:700;" class="truncate">${esc(e.title)}</div>
+                  <div style="font-size:11px;color:var(--muted);margin-top:2px;">${esc(md.accountById[e.account_id]?.name || "-")}</div>
+                </div>
+                <span class="mono" style="font-size:14px;font-weight:800;flex-shrink:0;margin-left:8px;">₩${won(e.amount)}</span>
+              </div>
+            </button>
+          `).join("")}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ---------------- 이벤트 바인딩 ----------------
+function bindAppEvents() {
+  document.querySelectorAll("[data-action]").forEach((el) => {
+    const action = el.dataset.action;
+    if (el.tagName === "FORM") return; // 폼은 아래에서 별도 처리
+    el.addEventListener("click", (e) => handleAction(action, el, e));
+  });
+  document.querySelectorAll("select[data-action]").forEach((el) => {
+    el.addEventListener("change", (e) => handleAction(el.dataset.action, el, e));
+  });
+
+  const expenseForm = document.getElementById("expense-form");
+  if (expenseForm) {
+    expenseForm.addEventListener("submit", onSubmitExpense);
+    const amountInput = document.getElementById("amount-input");
+    amountInput.addEventListener("input", () => {
+      const digits = amountInput.value.replace(/[^0-9]/g, "");
+      amountInput.value = digits ? Number(digits).toLocaleString("ko-KR") : "";
+      document.getElementById("amount-korean").textContent = digits ? wonToKorean(digits) : "";
+    });
+  }
+  const addAccountForm = document.querySelector('form[data-action="add-account"]');
+  if (addAccountForm) addAccountForm.addEventListener("submit", onAddAccount);
+  const addTagForm = document.querySelector('form[data-action="add-tag"]');
+  if (addTagForm) addTagForm.addEventListener("submit", onAddTag);
+}
+
+async function handleAction(action, el) {
+  const md = getMonthData();
+  if (action === "set-tab") { state.tab = el.dataset.tab; state.filterId = "all"; render(); }
+  else if (action === "shift-month") {
+    const dir = Number(el.dataset.dir);
+    state.cursor = new Date(state.cursor.getFullYear(), state.cursor.getMonth() + dir, 1);
+    render();
+  }
+  else if (action === "open-manage") { state.modal = { type: "manage" }; render(); }
+  else if (action === "close-modal") { state.modal = null; render(); }
+  else if (action === "open-add") {
+    state.modal = { type: "expense", data: { title:"", amount:"", account_id: state.accounts[0]?.id || "", tag_id: state.tags[0]?.id || "", memo:"", date: fmtDate(new Date()) } };
+    render();
+  }
+  else if (action === "open-edit") {
+    const item = state.expenses.find((e) => e.id === el.dataset.id);
+    if (item) { state.modal = { type: "expense", data: item }; render(); }
+  }
+  else if (action === "delete-expense") {
+    if (confirm("이 지출 내역을 삭제할까요?")) {
+      await supabase.from("expenses").delete().eq("id", el.dataset.id);
+      state.expenses = state.expenses.filter((e) => e.id !== el.dataset.id);
+      state.modal = null; render();
+    }
+  }
+  else if (action === "set-groupby") { state.groupBy = el.dataset.groupby; state.filterId = "all"; render(); }
+  else if (action === "set-filter") { state.filterId = el.value; render(); }
+  else if (action === "set-filter-direct") { state.filterId = el.dataset.id; render(); }
+  else if (action === "open-day") {
+    const dateStr = el.dataset.date;
+    const filtered = getFilteredExpenses(md.monthExpenses);
+    const items = filtered.filter((e) => e.date === dateStr);
+    if (items.length) { state.modal = { type: "day", dateStr, items }; render(); }
+  }
+  else if (action === "remove-account") {
+    await supabase.from("accounts").delete().eq("id", el.dataset.id);
+    state.accounts = state.accounts.filter((a) => a.id !== el.dataset.id);
+    render();
+  }
+  else if (action === "remove-tag") {
+    await supabase.from("tags").delete().eq("id", el.dataset.id);
+    state.tags = state.tags.filter((t) => t.id !== el.dataset.id);
+    render();
+  }
+  else if (action === "sign-out") {
+    await supabase.auth.signOut();
+  }
+}
+
+async function onSubmitExpense(e) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const payload = {
+    title: fd.get("title").trim(),
+    amount: Number(String(fd.get("amount")).replace(/[^0-9]/g, "")),
+    account_id: fd.get("account_id") || null,
+    tag_id: fd.get("tag_id") || null,
+    date: fd.get("date"),
+    memo: fd.get("memo") || "",
+  };
+  if (!payload.title || !payload.amount) return;
+  const editing = state.modal.data.id;
+  if (editing) {
+    const { data } = await supabase.from("expenses").update(payload).eq("id", editing).select().single();
+    state.expenses = state.expenses.map((ex) => (ex.id === editing ? data : ex));
+  } else {
+    payload.user_id = state.session.user.id;
+    const { data } = await supabase.from("expenses").insert(payload).select().single();
+    state.expenses = [data, ...state.expenses];
+  }
+  state.modal = null;
+  render();
+}
+
+async function onAddAccount(e) {
+  e.preventDefault();
+  const name = new FormData(e.target).get("name").trim();
+  if (!name) return;
+  const color = ACCOUNT_PALETTE[state.accounts.length % ACCOUNT_PALETTE.length];
+  const { data } = await supabase.from("accounts").insert({ user_id: state.session.user.id, name, color }).select().single();
+  state.accounts.push(data);
+  render();
+}
+async function onAddTag(e) {
+  e.preventDefault();
+  const name = new FormData(e.target).get("name").trim();
+  if (!name) return;
+  const color = TAG_PALETTE[state.tags.length % TAG_PALETTE.length];
+  const { data } = await supabase.from("tags").insert({ user_id: state.session.user.id, name, color }).select().single();
+  state.tags.push(data);
+  render();
+}
+
+// ---------------- 초기화 & 인증 상태 구독 ----------------
+async function init() {
+  const { data: { session } } = await supabase.auth.getSession();
+  state.session = session;
+  if (session) await loadAll();
+  state.loading = false;
+  render();
+
+  supabase.auth.onAuthStateChange(async (_event, session) => {
+    state.session = session;
+    if (session) { state.loading = true; render(); await loadAll(); }
+    else { state.accounts = []; state.tags = []; state.expenses = []; }
+    state.loading = false;
+    render();
+  });
+}
+
+init();
+</script>
+</body>
+</html>
