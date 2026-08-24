@@ -49,6 +49,7 @@
   button, .field-label, h1, h2 { white-space: nowrap; }
   ::selection { background: #4338CA33; }
   input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+  .drop-highlight { background: var(--surface2) !important; outline: 2px solid var(--brand); outline-offset: -2px; }
 </style>
 </head>
 <body>
@@ -103,7 +104,8 @@ function saveDraftFromForm(form) {
     title: fd.get("title") || "",
     amount: String(fd.get("amount") || "").replace(/[^0-9]/g, ""),
     account_id: fd.get("account_id") || "",
-    tag_id: fd.get("tag_id") || "",
+    tag_ids: fd.getAll("tag_ids"),
+    is_regret: fd.get("is_regret") === "on",
     date: fd.get("date") || "",
     memo: fd.get("memo") || "",
   };
@@ -126,6 +128,7 @@ const state = {
   tab: "dashboard",
   groupBy: "account",
   filterId: "all",
+  filterPickerOpen: false,
   modal: null, // { type: 'expense'|'manage'|'day', ...payload }
 };
 
@@ -161,7 +164,7 @@ async function seedDefaults() {
 // ---------------- 계산 헬퍼 ----------------
 function getMonthData() {
   const year = state.cursor.getFullYear(), month = state.cursor.getMonth();
-  const monthExpenses = state.expenses.filter((e) => {
+  const monthExpenses = state.expenses.filter(Boolean).filter((e) => {
     const d = new Date(e.date);
     return d.getFullYear() === year && d.getMonth() === month;
   });
@@ -174,7 +177,7 @@ function getMonthData() {
   const accountTotals = state.accounts.map((a) => ({ ...a, total: accMap[a.id] || 0 })).sort((a,b) => b.total - a.total);
 
   const tagMap = {};
-  monthExpenses.forEach((e) => { tagMap[e.tag_id] = (tagMap[e.tag_id] || 0) + Number(e.amount); });
+  monthExpenses.forEach((e) => { (e.tag_ids || []).forEach((tid) => { tagMap[tid] = (tagMap[tid] || 0) + Number(e.amount); }); });
   const tagTotals = state.tags.map((t) => ({ ...t, total: tagMap[t.id] || 0 })).sort((a,b) => b.total - a.total);
 
   const dailyTotals = {};
@@ -187,8 +190,8 @@ function getMonthData() {
 
 function getFilteredExpenses(monthExpenses) {
   if (state.filterId === "all") return monthExpenses;
-  const key = state.groupBy === "account" ? "account_id" : "tag_id";
-  return monthExpenses.filter((e) => e[key] === state.filterId);
+  if (state.groupBy === "account") return monthExpenses.filter((e) => e.account_id === state.filterId);
+  return monthExpenses.filter((e) => (e.tag_ids || []).includes(state.filterId));
 }
 
 // ---------------- 렌더링 ----------------
@@ -251,7 +254,8 @@ function renderApp() {
   let body = "";
   if (state.tab === "dashboard") body = renderDashboard(md);
   else if (state.tab === "calendar") body = renderCalendar(md);
-  else body = renderList(md);
+  else if (state.tab === "list") body = renderList(md);
+  else body = renderRegretTab();
 
   return `
     <div style="padding-top:20px;display:flex;align-items:flex-end;justify-content:space-between;gap:6px;">
@@ -270,11 +274,11 @@ function renderApp() {
     </div>
 
     <div style="display:flex;margin-top:20px;margin-bottom:8px;border-bottom:1px solid var(--border);">
-      ${["dashboard","calendar","list"].map((t) => `
+      ${["dashboard","calendar","list","regret"].map((t) => `
         <button data-action="set-tab" data-tab="${t}" style="flex:1;padding:10px 0;background:none;border:none;
-          font-size:13px;font-weight:${state.tab===t?700:500};color:${state.tab===t?"var(--text)":"var(--muted)"};
-          border-bottom:2px solid ${state.tab===t?"var(--brand)":"transparent"};margin-bottom:-1px;">
-          ${t==="dashboard"?"대시보드":t==="calendar"?"캘린더":"내역"}
+          font-size:11.5px;font-weight:${state.tab===t?700:500};color:${state.tab===t?"var(--text)":"var(--muted)"};
+          border-bottom:2px solid ${state.tab===t?"var(--brand)":"transparent"};margin-bottom:-1px;white-space:nowrap;">
+          ${t==="dashboard"?"대시보드":t==="calendar"?"캘린더":t==="list"?"내역":"불만족"}
         </button>`).join("")}
     </div>
 
@@ -345,20 +349,59 @@ function emptyNote(text) {
 }
 
 function filterBar() {
-  const opts = state.groupBy === "account" ? state.accounts : state.tags;
+  const isTag = state.groupBy === "tag";
+  const opts = isTag ? state.tags.filter((t) => !t.parent_id) : state.accounts;
+  const currentTag = isTag && state.filterId !== "all" ? state.tags.find((t) => t.id === state.filterId) : null;
+  const current = isTag ? currentTag : (state.filterId === "all" ? null : opts.find((o) => o.id === state.filterId));
+  const isOpen = !!state.filterPickerOpen;
+  const subParent = isTag && currentTag ? (currentTag.parent_id ? state.tags.find((t) => t.id === currentTag.parent_id) : currentTag) : null;
+  const subTags = subParent ? state.tags.filter((t) => t.parent_id === subParent.id) : [];
   return `
-    <div style="display:flex;gap:8px;margin:12px 0;">
-      <div style="display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;">
+    <div style="margin:12px 0;">
+    <div style="display:flex;gap:8px;position:relative;">
+      <div style="display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;flex-shrink:0;">
         ${["account","tag"].map((k) => `
           <button data-action="set-groupby" data-groupby="${k}" style="padding:6px 10px;font-size:11px;font-weight:700;border:none;
             background:${state.groupBy===k?"var(--text)":"transparent"};color:${state.groupBy===k?"#fff":"var(--text)"};">
             ${k==="account"?"계좌":"태그"}
           </button>`).join("")}
       </div>
-      <select id="filter-select" data-action="set-filter" style="flex:1;font-size:12px;padding:6px 8px;background:#fff;color:var(--text);border:1px solid var(--border);border-radius:8px;">
-        <option value="all" ${state.filterId==="all"?"selected":""}>전체 보기</option>
-        ${opts.map((o) => `<option value="${o.id}" ${state.filterId===o.id?"selected":""}>${esc(o.name)}</option>`).join("")}
-      </select>
+      <div style="flex:1;position:relative;">
+        <div data-action="toggle-filter-picker" style="display:flex;align-items:center;justify-content:space-between;gap:6px;
+          font-size:12px;padding:7px 10px;background:#fff;color:var(--text);border:1px solid var(--border);border-radius:8px;cursor:pointer;">
+          <span style="display:flex;align-items:center;gap:6px;min-width:0;">
+            ${current ? `<span style="width:7px;height:7px;border-radius:50%;background:${current.parent_id?state.tags.find(t=>t.id===current.parent_id)?.color:current.color};flex-shrink:0;"></span>` : ""}
+            <span class="truncate">${current ? (current.parent_id ? `${esc(state.tags.find(t=>t.id===current.parent_id)?.name||"")} › ${esc(current.name)}` : esc(current.name)) : "전체 보기"}</span>
+          </span>
+          <span style="color:var(--muted);flex-shrink:0;">${isOpen?"▲":"▼"}</span>
+        </div>
+        ${isOpen ? `
+          <div style="position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:30;background:#fff;
+            border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:0 8px 20px rgba(15,23,42,.12);max-height:240px;overflow-y:auto;">
+            <div data-action="select-filter-option" data-id="all" style="padding:10px 12px;font-size:13px;font-weight:${state.filterId==="all"?700:500};
+              color:var(--text);background:${state.filterId==="all"?"var(--surface2)":"#fff"};border-bottom:1px solid var(--border);cursor:pointer;">전체 보기</div>
+            ${opts.map((o) => `
+              <div data-action="select-filter-option" data-id="${o.id}" style="display:flex;align-items:center;gap:8px;padding:10px 12px;
+                font-size:13px;font-weight:${(state.filterId===o.id||subParent?.id===o.id)?700:500};color:var(--text);
+                background:${(state.filterId===o.id||subParent?.id===o.id)?o.color+"14":"#fff"};border-bottom:1px solid var(--border);cursor:pointer;">
+                <span style="width:8px;height:8px;border-radius:50%;background:${o.color};flex-shrink:0;"></span>
+                ${esc(o.name)}
+              </div>
+            `).join("")}
+          </div>
+        ` : ""}
+      </div>
+    </div>
+    ${subTags.length > 0 ? `
+      <div style="display:flex;gap:6px;overflow-x:auto;padding:8px 2px 2px;">
+        ${subTags.map((c) => `
+          <button data-action="select-filter-option" data-id="${c.id}" style="flex-shrink:0;padding:5px 12px;border-radius:999px;font-size:11.5px;font-weight:700;
+            border:1px solid ${c.color};background:${state.filterId===c.id?c.color:"#fff"};color:${state.filterId===c.id?"#fff":c.color};white-space:nowrap;">
+            ${esc(c.name)}
+          </button>
+        `).join("")}
+      </div>
+    ` : ""}
     </div>
   `;
 }
@@ -412,7 +455,10 @@ function renderCalendar(md) {
 
 function renderList(md) {
   const filtered = getFilteredExpenses(md.monthExpenses);
-  const totals = state.groupBy === "account" ? md.accountTotals : md.tagTotals;
+  const totals = state.groupBy === "account" ? md.accountTotals : md.tagTotals.filter((t) => !t.parent_id).map((t) => ({
+    ...t,
+    total: t.total + md.tagTotals.filter((c) => c.parent_id === t.id).reduce((s, c) => s + c.total, 0),
+  }));
   const sorted = [...filtered].sort((a,b) => b.date.localeCompare(a.date));
   return `
     ${filterBar()}
@@ -432,11 +478,11 @@ function renderList(md) {
         <button class="card" data-action="open-edit" data-id="${e.id}" style="display:block;width:100%;text-align:left;cursor:pointer;">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;">
             <div style="min-width:0;">
-              <div style="font-size:15px;font-weight:700;">${esc(e.title)}</div>
+              <div style="font-size:15px;font-weight:700;">${e.is_regret?"[불만족] ":""}${esc(e.title)}</div>
               <div style="font-size:11px;color:var(--muted);font-weight:600;margin-top:3px;">${e.date.slice(5).replace("-","/")}</div>
               <div style="display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap;">
                 ${badge(md.accountById[e.account_id]?.color || "#999", md.accountById[e.account_id]?.name || "-")}
-                ${badge(md.tagById[e.tag_id]?.color || "#999", md.tagById[e.tag_id]?.name || "-")}
+                ${(e.tag_ids||[]).map((tid) => md.tagById[tid] ? badge(md.tagById[tid].color, md.tagById[tid].name) : "").join("")}
               </div>
             </div>
             <span class="mono" style="font-size:16px;font-weight:800;flex-shrink:0;margin-left:8px;">₩${won(e.amount)}</span>
@@ -447,12 +493,116 @@ function renderList(md) {
   `;
 }
 
+function renderRegretTab() {
+  const items = state.expenses.filter(Boolean).filter((e) => e.is_regret).sort((a,b) => b.date.localeCompare(a.date));
+  const total = items.reduce((s,e) => s + Number(e.amount), 0);
+  return `
+    <div style="margin-top:8px;padding-bottom:20px;border-bottom:1px solid var(--border);">
+      <div style="font-size:11.5px;color:var(--muted);font-weight:700;">불만족 지출 합계</div>
+      <div class="mono" style="font-size:34px;font-weight:800;margin-top:6px;color:var(--warn);letter-spacing:-.02em;">₩${won(total)}</div>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:4px;font-weight:600;">${items.length}건 · 전체 기간</div>
+    </div>
+    <div style="margin-top:16px;">
+      ${items.map((e) => `
+        <button class="card" data-action="open-edit" data-id="${e.id}" style="display:flex;justify-content:space-between;align-items:center;width:100%;text-align:left;">
+          <div style="min-width:0;">
+            <div class="truncate" style="font-size:15px;font-weight:700;">${esc(e.title)}</div>
+            <div style="font-size:11px;color:var(--muted);font-weight:600;margin-top:3px;">${e.date}</div>
+          </div>
+          <span class="mono" style="font-size:16px;font-weight:800;color:var(--warn);flex-shrink:0;margin-left:8px;">₩${won(e.amount)}</span>
+        </button>
+      `).join("") || emptyNote("아직 불만족 표시한 지출이 없어요. 지출 수정 화면에서 '불만족'을 체크해보세요.")}
+    </div>
+  `;
+}
+
 function renderModal(md) {
   if (!state.modal) return "";
   if (state.modal.type === "expense") return renderExpenseModal(state.modal.data);
   if (state.modal.type === "manage") return renderManageModal();
   if (state.modal.type === "day") return renderDayModal(state.modal, md);
   return "";
+}
+
+// 노션 다중 선택 스타일 태그 피커: 선택된 태그는 칩으로, 탭하면 옵션 목록이 펼쳐짐
+// 태그 목록을 상위 태그 다음에 그 하위 태그들이 오도록 정렬 (표시용)
+function orderTagsByHierarchy(tags) {
+  const parents = tags.filter((t) => !t.parent_id);
+  const childrenOf = (pid) => tags.filter((t) => t.parent_id === pid);
+  const out = [];
+  parents.forEach((p) => {
+    out.push({ tag: p, indent: 0 });
+    childrenOf(p.id).forEach((c) => out.push({ tag: c, indent: 16 }));
+  });
+  return out;
+}
+
+function renderTagPicker(data) {
+  const selectedIds = data.tag_ids || [];
+  const isOpen = !!state.modal?.tagPickerOpen;
+  return `
+    <div>
+      <div data-action="toggle-tag-picker"
+        style="width:100%;min-height:42px;display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 10px;
+        background:var(--surface2);border:1px solid var(--border);border-radius:10px;text-align:left;cursor:pointer;">
+        ${selectedIds.length === 0 ? `<span style="font-size:13px;color:var(--muted);">태그 선택</span>` : ""}
+        ${selectedIds.map((id) => {
+          const t = state.tags.find((x) => x.id === id);
+          if (!t) return "";
+          return `
+            <span data-action="unselect-tag" data-id="${t.id}" style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:6px;font-size:12px;font-weight:700;background:${t.color}22;color:${t.color};">
+              ${esc(t.name)}
+              <span style="font-size:12px;line-height:1;">✕</span>
+            </span>
+          `;
+        }).join("")}
+        <span style="margin-left:auto;color:var(--muted);font-size:12px;flex-shrink:0;">${isOpen?"▲":"▼"}</span>
+      </div>
+      ${isOpen ? `
+        <div style="margin-top:6px;border:1px solid var(--border);border-radius:10px;overflow:hidden;">
+          ${state.tags.length === 0 ? `<div style="padding:12px;font-size:12px;color:var(--muted);">등록된 태그가 없어요.</div>` : ""}
+          ${state.tags.filter((t) => !t.parent_id).map((p) => {
+            const checked = selectedIds.includes(p.id);
+            const children = state.tags.filter((t) => t.parent_id === p.id);
+            const expanded = (state.modal?.expandedTagIds || []).includes(p.id);
+            return `
+              <div style="border-bottom:1px solid var(--border);">
+                <div style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:10px 12px;cursor:pointer;
+                  background:${checked?p.color+"14":"#fff"};">
+                  <span data-action="toggle-tag" data-id="${p.id}" style="flex:1;display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--text);">
+                    <span style="width:8px;height:8px;border-radius:2px;background:${p.color};display:inline-block;"></span>
+                    ${esc(p.name)}
+                    ${checked ? `<span style="color:${p.color};font-weight:800;">✓</span>` : ""}
+                  </span>
+                  ${children.length > 0 ? `
+                    <span data-action="toggle-tag-expand" data-id="${p.id}" style="color:var(--muted);font-size:11px;font-weight:700;padding:4px 6px;flex-shrink:0;">
+                      ${expanded?"접기 ▲":`하위 ${children.length} ▼`}
+                    </span>
+                  ` : ""}
+                </div>
+                ${expanded ? children.map((c) => {
+                  const cChecked = selectedIds.includes(c.id);
+                  return `
+                    <div data-action="toggle-tag" data-id="${c.id}"
+                      style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:9px 12px 9px 30px;cursor:pointer;
+                      background:${cChecked?c.color+"14":"var(--surface2)"};border-top:1px solid var(--border);text-align:left;">
+                      <span style="display:inline-flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;color:var(--text);">
+                        <span style="color:var(--muted);">↳</span>
+                        <span style="width:7px;height:7px;border-radius:2px;background:${c.color};display:inline-block;"></span>
+                        ${esc(c.name)}
+                      </span>
+                      ${cChecked ? `<span style="color:${c.color};font-weight:800;">✓</span>` : ""}
+                    </div>
+                  `;
+                }).join("") : ""}
+              </div>
+            `;
+          }).join("")}
+        </div>
+      ` : ""}
+      ${selectedIds.map((id) => `<input type="hidden" name="tag_ids" value="${id}" />`).join("")}
+    </div>
+  `;
 }
 
 function renderExpenseModal(data) {
@@ -475,19 +625,15 @@ function renderExpenseModal(data) {
             <input class="input mono" id="amount-input" name="amount" required inputmode="numeric" value="${amountDisplay}" placeholder="0" />
             <div id="amount-korean" style="font-size:12px;color:var(--muted);margin-top:4px;">${data.amount ? wonToKorean(data.amount) : ""}</div>
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-            <div>
-              <div class="field-label">계좌</div>
-              <select class="input" name="account_id">
-                ${state.accounts.map((a) => `<option value="${a.id}" ${data.account_id===a.id?"selected":""}>${esc(a.name)}</option>`).join("")}
-              </select>
-            </div>
-            <div>
-              <div class="field-label">태그</div>
-              <select class="input" name="tag_id">
-                ${state.tags.map((t) => `<option value="${t.id}" ${data.tag_id===t.id?"selected":""}>${esc(t.name)}</option>`).join("")}
-              </select>
-            </div>
+          <div>
+            <div class="field-label">계좌</div>
+            <select class="input" name="account_id">
+              ${state.accounts.map((a) => `<option value="${a.id}" ${data.account_id===a.id?"selected":""}>${esc(a.name)}</option>`).join("")}
+            </select>
+          </div>
+          <div>
+            <div class="field-label">태그</div>
+            ${renderTagPicker(data)}
           </div>
           <div>
             <div class="field-label">날짜</div>
@@ -497,6 +643,10 @@ function renderExpenseModal(data) {
             <div class="field-label">내용 (메모)</div>
             <textarea class="input" name="memo" rows="2" placeholder="선택 입력">${esc(data.memo || "")}</textarea>
           </div>
+          <label style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--warn-bg);border-radius:10px;font-size:13px;font-weight:700;color:var(--warn);">
+            <input type="checkbox" name="is_regret" ${data.is_regret?"checked":""} style="accent-color:var(--warn);width:16px;height:16px;" />
+            불만족
+          </label>
           <div style="display:flex;gap:8px;margin-top:6px;">
             ${!isNew ? `<button type="button" data-action="delete-expense" data-id="${data.id}" style="padding:10px 16px;font-size:13px;background:#fff;color:var(--warn);border:1px solid var(--warn);border-radius:10px;">삭제</button>` : ""}
             <button type="submit" class="btn-primary" style="flex:1;">저장</button>
@@ -505,6 +655,25 @@ function renderExpenseModal(data) {
       </div>
     </div>
   `;
+}
+
+function renderTagTree() {
+  const parents = state.tags.filter((t) => !t.parent_id);
+  const childrenOf = (pid) => state.tags.filter((t) => t.parent_id === pid);
+  const row = (t, indent) => `
+    <div data-tagrow="${t.id}" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);padding-left:${indent}px;transition:background .15s;">
+      <span style="display:flex;align-items:center;gap:6px;min-width:0;">
+        <span data-draghandle="${t.id}" style="touch-action:none;cursor:grab;color:var(--muted);font-size:15px;padding:4px 6px;flex-shrink:0;">⠿</span>
+        ${indent > 0 ? `<span style="color:var(--muted);">↳</span>` : ""}
+        ${badge(t.color, t.name)}
+      </span>
+      <button data-action="remove-tag" data-id="${t.id}" style="background:none;border:none;color:var(--warn);font-size:12px;flex-shrink:0;">삭제</button>
+    </div>
+  `;
+  const dropZone = `<div data-dropzone="root" style="padding:10px;text-align:center;font-size:11px;color:var(--muted);border:1px dashed var(--border);border-radius:8px;margin-bottom:6px;transition:background .15s;">태그를 여기로 끌면 최상위로 이동해요</div>`;
+  const body = parents.map((p) => row(p, 0) + childrenOf(p.id).map((c) => row(c, 22)).join("")).join("")
+    || `<div style="font-size:12px;color:var(--muted);padding:8px 0;">등록된 태그가 없어요.</div>`;
+  return dropZone + body;
 }
 
 function renderManageModal() {
@@ -527,15 +696,14 @@ function renderManageModal() {
           <button type="submit" class="btn-primary" style="padding:0 16px;flex-shrink:0;">추가</button>
         </form>
         <div style="font-size:12px;font-weight:800;margin-bottom:8px;">태그</div>
-        ${state.tags.map((t) => `
-          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);">
-            ${badge(t.color, t.name)}
-            <button data-action="remove-tag" data-id="${t.id}" style="background:none;border:none;color:var(--warn);font-size:12px;">삭제</button>
-          </div>
-        `).join("")}
-        <form data-action="add-tag" style="display:flex;gap:8px;margin-top:12px;">
+        ${renderTagTree()}
+        <form data-action="add-tag" style="display:flex;flex-direction:column;gap:8px;margin-top:12px;">
           <input class="input" name="name" placeholder="새 태그 이름" required />
-          <button type="submit" class="btn-primary" style="padding:0 16px;flex-shrink:0;">추가</button>
+          <select class="input" name="parent_id">
+            <option value="">상위 태그 없음 (최상위)</option>
+            ${state.tags.filter((t) => !t.parent_id).map((t) => `<option value="${t.id}">${esc(t.name)} 하위로</option>`).join("")}
+          </select>
+          <button type="submit" class="btn-primary" style="padding:10px 0;">추가</button>
         </form>
       </div>
     </div>
@@ -576,7 +744,7 @@ function renderDayModal(modal, md) {
 function bindAppEvents() {
   document.querySelectorAll("[data-action]").forEach((el) => {
     const action = el.dataset.action;
-    if (el.tagName === "FORM") return; // 폼은 아래에서 별도 처리
+    if (el.tagName === "FORM" || el.tagName === "SELECT") return; // 폼/셀렉트는 아래에서 별도 처리
     el.addEventListener("click", (e) => handleAction(action, el, e));
   });
   document.querySelectorAll("select[data-action]").forEach((el) => {
@@ -599,11 +767,72 @@ function bindAppEvents() {
   if (addAccountForm) addAccountForm.addEventListener("submit", onAddAccount);
   const addTagForm = document.querySelector('form[data-action="add-tag"]');
   if (addTagForm) addTagForm.addEventListener("submit", onAddTag);
+
+  bindTagDragHandlers();
 }
 
-async function handleAction(action, el) {
+// ---------------- 태그 드래그로 상위/하위 이동 ----------------
+function bindTagDragHandlers() {
+  document.querySelectorAll("[data-draghandle]").forEach((handle) => {
+    handle.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      const dragId = handle.dataset.draghandle;
+      const row = handle.closest("[data-tagrow]");
+      let currentTarget = null;
+      if (row) row.style.opacity = "0.4";
+      try { handle.setPointerCapture(ev.pointerId); } catch (err) {}
+
+      const onMove = (moveEv) => {
+        const el = document.elementFromPoint(moveEv.clientX, moveEv.clientY);
+        const target = el ? el.closest("[data-tagrow],[data-dropzone]") : null;
+        if (currentTarget && currentTarget !== target) currentTarget.classList.remove("drop-highlight");
+        if (target && target !== row) { target.classList.add("drop-highlight"); currentTarget = target; }
+        else currentTarget = null;
+      };
+      const onUp = async () => {
+        handle.removeEventListener("pointermove", onMove);
+        handle.removeEventListener("pointerup", onUp);
+        if (currentTarget) currentTarget.classList.remove("drop-highlight");
+        if (row) row.style.opacity = "";
+        if (currentTarget) {
+          await handleTagDrop(dragId, currentTarget.dataset.tagrow || null, currentTarget.dataset.dropzone === "root");
+        }
+      };
+      handle.addEventListener("pointermove", onMove);
+      handle.addEventListener("pointerup", onUp);
+    });
+  });
+}
+
+async function handleTagDrop(dragId, targetTagId, isRoot) {
+  const dragTag = state.tags.find((t) => t.id === dragId);
+  if (!dragTag) return;
+  if (isRoot) {
+    if (!dragTag.parent_id) return;
+    const { data, error } = await supabase.from("tags").update({ parent_id: null }).eq("id", dragId).select().single();
+    if (error || !data) { alert("이동 실패: " + (error?.message || "알 수 없는 오류")); return; }
+    state.tags = state.tags.map((t) => (t.id === dragId ? data : t));
+    render();
+    return;
+  }
+  if (!targetTagId || targetTagId === dragId) return;
+  const targetTag = state.tags.find((t) => t.id === targetTagId);
+  if (!targetTag) return;
+  const newParentId = targetTag.parent_id ? targetTag.parent_id : targetTag.id;
+  if (newParentId === dragId) return;
+  if (dragTag.parent_id === newParentId) return;
+  const hasChildren = state.tags.some((t) => t.parent_id === dragId);
+  if (hasChildren) { alert("이 태그는 하위 태그를 가지고 있어서 다른 태그의 하위로 옮길 수 없어요. 먼저 하위 태그를 정리해주세요."); return; }
+  const { data, error } = await supabase.from("tags").update({ parent_id: newParentId }).eq("id", dragId).select().single();
+  if (error || !data) { alert("이동 실패: " + (error?.message || "알 수 없는 오류")); return; }
+  state.tags = state.tags.map((t) => (t.id === dragId ? data : t));
+  render();
+}
+
+async function handleAction(action, el, e) {
+  if ((action === "unselect-tag" || action === "toggle-tag") && e) e.stopPropagation();
   const md = getMonthData();
-  if (action === "set-tab") { state.tab = el.dataset.tab; state.filterId = "all"; render(); }
+  if (action === "set-tab") { state.tab = el.dataset.tab; state.filterId = "all"; state.filterPickerOpen = false; render(); }
   else if (action === "shift-month") {
     const dir = Number(el.dataset.dir);
     state.cursor = new Date(state.cursor.getFullYear(), state.cursor.getMonth() + dir, 1);
@@ -616,13 +845,13 @@ async function handleAction(action, el) {
   }
   else if (action === "open-add") {
     clearDraft();
-    state.modal = { type: "expense", data: { title:"", amount:"", account_id: state.accounts[0]?.id || "", tag_id: state.tags[0]?.id || "", memo:"", date: fmtDate(new Date()) } };
+    state.modal = { type: "expense", data: { title:"", amount:"", account_id: state.accounts[0]?.id || "", tag_ids: [], is_regret: false, memo:"", date: fmtDate(new Date()) }, expandedTagIds: [] };
     render();
   }
   else if (action === "open-edit") {
     clearDraft();
     const item = state.expenses.find((e) => e.id === el.dataset.id);
-    if (item) { state.modal = { type: "expense", data: item }; render(); }
+    if (item) { state.modal = { type: "expense", data: item, expandedTagIds: (item.tag_ids||[]).map((id)=>state.tags.find(t=>t.id===id)?.parent_id).filter(Boolean) }; render(); }
   }
   else if (action === "delete-expense") {
     if (confirm("이 지출 내역을 삭제할까요?")) {
@@ -631,8 +860,9 @@ async function handleAction(action, el) {
       state.modal = null; render();
     }
   }
-  else if (action === "set-groupby") { state.groupBy = el.dataset.groupby; state.filterId = "all"; render(); }
-  else if (action === "set-filter") { state.filterId = el.value; render(); }
+  else if (action === "set-groupby") { state.groupBy = el.dataset.groupby; state.filterId = "all"; state.filterPickerOpen = false; render(); }
+  else if (action === "toggle-filter-picker") { state.filterPickerOpen = !state.filterPickerOpen; render(); }
+  else if (action === "select-filter-option") { state.filterId = el.dataset.id; state.filterPickerOpen = false; render(); }
   else if (action === "set-filter-direct") { state.filterId = el.dataset.id; render(); }
   else if (action === "open-day") {
     const dateStr = el.dataset.date;
@@ -653,6 +883,24 @@ async function handleAction(action, el) {
   else if (action === "sign-out") {
     await supabase.auth.signOut();
   }
+  else if (action === "toggle-tag-picker") {
+    state.modal.tagPickerOpen = !state.modal.tagPickerOpen;
+    render();
+  }
+  else if (action === "toggle-tag-expand") {
+    const id = el.dataset.id;
+    const cur = state.modal.expandedTagIds || [];
+    state.modal.expandedTagIds = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
+    render();
+  }
+  else if (action === "toggle-tag" || action === "unselect-tag") {
+    const id = el.dataset.id;
+    const cur = state.modal.data.tag_ids || [];
+    state.modal.data.tag_ids = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
+    render();
+    const f = document.getElementById("expense-form");
+    if (f) saveDraftFromForm(f);
+  }
 }
 
 async function onSubmitExpense(e) {
@@ -662,19 +910,28 @@ async function onSubmitExpense(e) {
     title: fd.get("title").trim(),
     amount: Number(String(fd.get("amount")).replace(/[^0-9]/g, "")),
     account_id: fd.get("account_id") || null,
-    tag_id: fd.get("tag_id") || null,
+    tag_ids: fd.getAll("tag_ids"),
+    is_regret: fd.get("is_regret") === "on",
     date: fd.get("date"),
     memo: fd.get("memo") || "",
   };
   if (!payload.title || !payload.amount) return;
   const editing = state.modal.data.id;
+  let result;
   if (editing) {
-    const { data } = await supabase.from("expenses").update(payload).eq("id", editing).select().single();
-    state.expenses = state.expenses.map((ex) => (ex.id === editing ? data : ex));
+    result = await supabase.from("expenses").update(payload).eq("id", editing).select().single();
   } else {
     payload.user_id = state.session.user.id;
-    const { data } = await supabase.from("expenses").insert(payload).select().single();
-    state.expenses = [data, ...state.expenses];
+    result = await supabase.from("expenses").insert(payload).select().single();
+  }
+  if (result.error || !result.data) {
+    alert("저장에 실패했어요: " + (result.error?.message || "알 수 없는 오류") + "\n(태그/불만족 기능을 쓰려면 supabase-migration-2.sql을 먼저 실행해야 해요)");
+    return;
+  }
+  if (editing) {
+    state.expenses = state.expenses.map((ex) => (ex.id === editing ? result.data : ex));
+  } else {
+    state.expenses = [result.data, ...state.expenses];
   }
   state.modal = null;
   clearDraft();
@@ -686,16 +943,20 @@ async function onAddAccount(e) {
   const name = new FormData(e.target).get("name").trim();
   if (!name) return;
   const color = ACCOUNT_PALETTE[state.accounts.length % ACCOUNT_PALETTE.length];
-  const { data } = await supabase.from("accounts").insert({ user_id: state.session.user.id, name, color }).select().single();
+  const { data, error } = await supabase.from("accounts").insert({ user_id: state.session.user.id, name, color }).select().single();
+  if (error || !data) { alert("계좌 추가에 실패했어요: " + (error?.message || "알 수 없는 오류")); return; }
   state.accounts.push(data);
   render();
 }
 async function onAddTag(e) {
   e.preventDefault();
-  const name = new FormData(e.target).get("name").trim();
+  const fd = new FormData(e.target);
+  const name = fd.get("name").trim();
   if (!name) return;
+  const parent_id = fd.get("parent_id") || null;
   const color = TAG_PALETTE[state.tags.length % TAG_PALETTE.length];
-  const { data } = await supabase.from("tags").insert({ user_id: state.session.user.id, name, color }).select().single();
+  const { data, error } = await supabase.from("tags").insert({ user_id: state.session.user.id, name, color, parent_id }).select().single();
+  if (error || !data) { alert("태그 추가에 실패했어요: " + (error?.message || "알 수 없는 오류") + "\n(supabase-migration-3.sql을 먼저 실행해야 해요)"); return; }
   state.tags.push(data);
   render();
 }
@@ -730,7 +991,8 @@ function restoreDraftIfAny() {
       title: draft.title || "",
       amount: draft.amount || "",
       account_id: draft.account_id || state.accounts[0]?.id || "",
-      tag_id: draft.tag_id || state.tags[0]?.id || "",
+      tag_ids: draft.tag_ids || [],
+      is_regret: !!draft.is_regret,
       date: draft.date || fmtDate(new Date()),
       memo: draft.memo || "",
     },
